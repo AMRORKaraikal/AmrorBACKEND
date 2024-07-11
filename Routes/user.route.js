@@ -81,21 +81,13 @@ const newSpecimenRegister = async (req, res, next) => {
 
 		// Generate patient ID
 		let patientId = ''
-		const digits = 6 - count.toString().length
+		const digits = 5 - count.toString().length
 		const year = new Date().getFullYear() % 100
 
 		const arr = Array.from({ length: digits }, () => '0')
 
-		let gen = ''
-		if (gender === 'Male') {
-			gen = 'M'
-		} else if (gender === 'Female') {
-			gen = 'F'
-		} else {
-			gen = 'O'
-		}
 
-		patientId = patientId + [gen, year, ...arr, count].join('')
+		patientId = patientId + [ year, ...arr, count].join('')
 
 		//console.log(patientId)
 
@@ -299,8 +291,24 @@ const getMonthlyData = async (req, res, next) => {
 				month: month,
 				year: year,
 			},
-			{ ast: 1, report_date: 1, _id: 0 }
+			{_id:0,__v:0}
 		)
+		const patients = await patientModel.find({},{_id:0,__v:0})
+		const specimens = await specimenModel.find({},{_id:0,__v:0})
+		const report = data.map((d1)=>{
+			const patient = patients.find((p)=>p.patient_id === d1.patient_id)
+			const specimen = specimens.find((s)=>s.specimen_id === d1.specimen_id)
+			
+			const mergedDocument = {
+				...patient._doc,
+				...d1._doc,
+				...specimen._doc,
+			  };
+			  delete mergedDocument.specimen_id;
+delete mergedDocument.patient_id;
+			// console.log(mergedDocument);
+			return mergedDocument
+		})
 		let ast = []
 		data.forEach((element) => {
 			ast.push(...element.ast)
@@ -338,6 +346,7 @@ const getMonthlyData = async (req, res, next) => {
 			message: 'Fetched Patient History Successfully!',
 			data: arr,
 			micro,
+			report,
 		})
 	} catch (error) {
 		//console.log(error)
