@@ -3,6 +3,9 @@ import userModel from '../Models/user.model.js'
 import patientModel from '../Models/patient.model.js'
 import specimenModel from '../Models/specimen.model.js'
 import reportModel from '../Models/report.model.js'
+import newSpecimenModel from '../Models/newspecimen.model.js'
+import newPatientModel from '../Models/newpatient.model.js'
+import newReportModel from '../Models/newreport.model.js'
 const router = Router()
 
 const login = async (req, res, next) => {
@@ -75,42 +78,29 @@ const patientDetails = async (req, res, next) => {
 const newSpecimenRegister = async (req, res, next) => {
 	try {
 		let { patient_data, specimen_data } = req.body
-		let gender = patient_data.gender
-
-		const count = (await patientModel.countDocuments({ gender: gender })) + 1
-
-		// Generate patient ID
-		let patientId = ''
-		const digits = 5 - count.toString().length
-		const year = new Date().getFullYear() % 100
-
-		const arr = Array.from({ length: digits }, () => '0')
-
-
-		patientId = patientId + [ year, ...arr, count].join('')
-
-		//console.log(patientId)
 
 		patient_data = {
 			...patient_data,
-			patient_id: patientId,
 		}
+
+		let { lab_id } = patient_data
 
 		specimen_data = {
 			...specimen_data,
-			patient_id: patientId,
 		}
 
-		await patientModel.insertMany(patient_data)
-		await specimenModel.insertMany(specimen_data)
+		console.log(lab_id)
+
+		await newPatientModel.insertMany(patient_data)
+		await newSpecimenModel.insertMany(specimen_data)
 
 		res.status(201).json({
 			success: true,
 			message: 'Data Added Successfully!',
-			patientId,
+			lab_id,
 		})
 	} catch (error) {
-		//console.log(error)
+		console.log(error)
 		res.status(500).json({
 			success: false,
 			message: error.message,
@@ -184,7 +174,7 @@ const reportRegister = async (req, res, next) => {
 		]
 		report_data.month = month[today.getMonth()]
 		report_data.year = today.getFullYear()
-		await reportModel.insertMany(report_data)
+		await newReportModel.insertMany(report_data)
 
 		res.status(201).json({
 			success: true,
@@ -227,19 +217,43 @@ const getReport = async (req, res, next) => {
 		})
 	}
 }
+const getNewReport = async (req, res, next) => {
+	try {
+		let { lab_id } = req.body
+
+		let report = await newReportModel.findOne({ lab_id }, { _id: 0 })
+		let patientData = await newPatientModel.findOne({ lab_id }, { _id: 0 })
+		let specimenData = await newSpecimenModel.findOne({ lab_id }, { _id: 0 })
+		res.status(201).json({
+			success: true,
+			message: 'Fetched Report Successfully!',
+			report: report,
+			patientData: patientData,
+			specimenData: specimenData,
+		})
+	} catch (error) {
+		//console.log(error)
+		res.status(500).json({
+			success: false,
+			message: error.message,
+		})
+	}
+}
 const getDetails = async (req, res, next) => {
 	try {
-		let { patient_id, specimen_id } = req.body
+		let { lab_id } = req.body
 		//console.log(patient_id)
 		//console.log(specimen_id)
 
-		let patientData = await patientModel.findOne(
-			{ patient_id: patient_id },
+		console.log(lab_id)
+
+		let patientData = await newPatientModel.findOne(
+			{ lab_id: lab_id },
 			{ _id: 0 }
 		)
 
-		let specimenData = await specimenModel.findOne(
-			{ patient_id: patient_id, specimen_id: specimen_id },
+		let specimenData = await newSpecimenModel.findOne(
+			{ lab_id: lab_id },
 			{ _id: 0 }
 		)
 		//console.log(specimenData)
@@ -291,21 +305,95 @@ const getMonthlyData = async (req, res, next) => {
 				month: month,
 				year: year,
 			},
-			{_id:0,__v:0}
+			{ _id: 0, __v: 0 }
 		)
-		const patients = await patientModel.find({},{_id:0,__v:0})
-		const specimens = await specimenModel.find({},{_id:0,__v:0})
-		const report = data.map((d1)=>{
-			const patient = patients.find((p)=>p.patient_id === d1.patient_id)
-			const specimen = specimens.find((s)=>s.specimen_id === d1.specimen_id)
-			
+		const patients = await patientModel.find({}, { _id: 0, __v: 0 })
+		const specimens = await specimenModel.find({}, { _id: 0, __v: 0 })
+		const report = data.map((d1) => {
+			const patient = patients.find((p) => p.patient_id === d1.patient_id)
+			const specimen = specimens.find((s) => s.specimen_id === d1.specimen_id)
+
 			const mergedDocument = {
 				...patient._doc,
 				...d1._doc,
 				...specimen._doc,
-			  };
-			  delete mergedDocument.specimen_id;
-delete mergedDocument.patient_id;
+			}
+			delete mergedDocument.specimen_id
+			delete mergedDocument.patient_id
+			// console.log(mergedDocument);
+			return mergedDocument
+		})
+		let ast = []
+		data.forEach((element) => {
+			ast.push(...element.ast)
+		})
+		let arr = []
+		let micro = {}
+		ast.forEach((element) => {
+			let id = arr.findIndex((item) => item.Microbe === element.Microbe)
+			if (id === -1) {
+				let ax = {
+					Microbe: element.Microbe,
+					Antibiotics: {},
+				}
+				micro[element.Microbe] = 1
+				let anti = element.Antibiotic
+				if (ax.Antibiotics[anti]) {
+					ax.Antibiotics[anti].push(element.Result)
+				} else {
+					ax.Antibiotics[anti] = [element.Result]
+				}
+
+				arr.push(ax)
+			} else {
+				micro[element.Microbe] += 1
+				let anti = element.Antibiotic
+				if (arr[id].Antibiotics[anti]) {
+					arr[id].Antibiotics[anti].push(element.Result)
+				} else {
+					arr[id].Antibiotics[anti] = [element.Result]
+				}
+			}
+		})
+		res.status(201).json({
+			success: true,
+			message: 'Fetched Patient History Successfully!',
+			data: arr,
+			micro,
+			report,
+		})
+	} catch (error) {
+		//console.log(error)
+		res.status(500).json({
+			success: false,
+			message: error.message,
+		})
+	}
+}
+const getNewMonthlyData = async (req, res, next) => {
+	try {
+		const { month, year } = req.body
+		//console.log(month, year)
+		const data = await newReportModel.find(
+			{
+				month: month,
+				year: year,
+			},
+			{ _id: 0, __v: 0 }
+		)
+		const patients = await newPatientModel.find({}, { _id: 0, __v: 0 })
+		const specimens = await newSpecimenModel.find({}, { _id: 0, __v: 0 })
+		const report = data.map((d1) => {
+			const patient = patients.find((p) => p.patient_id === d1.patient_id)
+			const specimen = specimens.find((s) => s.specimen_id === d1.specimen_id)
+
+			const mergedDocument = {
+				...patient._doc,
+				...d1._doc,
+				...specimen._doc,
+			}
+			delete mergedDocument.specimen_id
+			delete mergedDocument.patient_id
 			// console.log(mergedDocument);
 			return mergedDocument
 		})
@@ -360,6 +448,7 @@ delete mergedDocument.patient_id;
 router.post('/login', login)
 router.post('/patient-details', patientDetails)
 router.post('/report', getMonthlyData)
+router.post('/updated-report', getNewMonthlyData)
 router.post('/new-specimen', newSpecimenRegister)
 
 router.post('/existing-specimen-register', ExistingSpecimenRegister)
@@ -369,6 +458,7 @@ router.post('/new-report', reportRegister)
 router.post('/get-report-details', getDetails)
 
 router.post('/get-report', getReport)
+router.post('/get-new-report', getNewReport)
 
 // router.post('/get-patient-data', getPatientHistory)
 
