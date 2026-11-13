@@ -296,148 +296,146 @@ const getPatientHistory = async (req, res, next) => {
 	}
 }
 
+// Builds the chart data for the Monthly Analytics page from a month's reports.
+//   data  -> one entry per organism, with every antibiotic result recorded for it
+//   micro -> number of isolates per organism (each report counts an organism once,
+//            however many antibiotics were tested against it)
+const summariseAst = (reports) => {
+	const arr = []
+	const micro = {}
+	reports.forEach((r) => {
+		const organismsInReport = new Set()
+		;(r.ast || []).forEach((element) => {
+			if (!element || !element.Microbe) return
+			organismsInReport.add(element.Microbe)
+			let entry = arr.find((item) => item.Microbe === element.Microbe)
+			if (!entry) {
+				entry = { Microbe: element.Microbe, Antibiotics: {} }
+				arr.push(entry)
+			}
+			const anti = element.Antibiotic
+			if (entry.Antibiotics[anti]) {
+				entry.Antibiotics[anti].push(element.Result)
+			} else {
+				entry.Antibiotics[anti] = [element.Result]
+			}
+		})
+		organismsInReport.forEach((m) => {
+			micro[m] = (micro[m] || 0) + 1
+		})
+	})
+	return { data: arr, micro }
+}
+
+// Index documents by a key, keeping the first document for each key
+// (the same one the Print Report screen's findOne() returns).
+const indexBy = (docs, key) => {
+	const map = new Map()
+	docs.forEach((d) => {
+		const k = d[key]
+		if (k !== undefined && k !== null && k !== '' && !map.has(k)) {
+			map.set(k, d._doc || d)
+		}
+	})
+	return map
+}
+
+// Old data (before the Lab ID system): reports link to patients by patient_id
+// and to specimens by patient_id + specimen_id.
 const getMonthlyData = async (req, res, next) => {
 	try {
-		const { month, year } = req.body
-		//console.log(month, year)
-		const data = await reportModel.find(
-			{
-				month: month,
-				year: year,
-			},
+		const { month } = req.body
+		const year = Number(req.body.year)
+		const data = await reportModel.find({ month, year }, { _id: 0, __v: 0 })
+
+		const patientIds = [
+			...new Set(data.map((d) => d.patient_id).filter((v) => v)),
+		]
+		const patients = await patientModel.find(
+			{ patient_id: { $in: patientIds } },
 			{ _id: 0, __v: 0 }
 		)
-		const patients = await patientModel.find({}, { _id: 0, __v: 0 })
-		const specimens = await specimenModel.find({}, { _id: 0, __v: 0 })
+		const specimens = await specimenModel.find(
+			{ patient_id: { $in: patientIds } },
+			{ _id: 0, __v: 0 }
+		)
+		const patientById = indexBy(patients, 'patient_id')
+		const specimenByKey = new Map()
+		specimens.forEach((s) => {
+			const k = `${s.patient_id}|${s.specimen_id}`
+			if (!specimenByKey.has(k)) specimenByKey.set(k, s._doc)
+		})
+
 		const report = data.map((d1) => {
-			const patient = patients.find((p) => p.patient_id === d1.patient_id)
-			const specimen = specimens.find((s) => s.specimen_id === d1.specimen_id)
-
-			const mergedDocument = {
-				...patient._doc,
+			const merged = {
+				...(patientById.get(d1.patient_id) || {}),
+				...(specimenByKey.get(`${d1.patient_id}|${d1.specimen_id}`) || {}),
 				...d1._doc,
-				...specimen._doc,
 			}
-			delete mergedDocument.specimen_id
-			delete mergedDocument.patient_id
-			// console.log(mergedDocument);
-			return mergedDocument
+			delete merged.__v
+			return merged
 		})
-		let ast = []
-		data.forEach((element) => {
-			ast.push(...element.ast)
-		})
-		let arr = []
-		let micro = {}
-		ast.forEach((element) => {
-			let id = arr.findIndex((item) => item.Microbe === element.Microbe)
-			if (id === -1) {
-				let ax = {
-					Microbe: element.Microbe,
-					Antibiotics: {},
-				}
-				micro[element.Microbe] = 1
-				let anti = element.Antibiotic
-				if (ax.Antibiotics[anti]) {
-					ax.Antibiotics[anti].push(element.Result)
-				} else {
-					ax.Antibiotics[anti] = [element.Result]
-				}
 
-				arr.push(ax)
-			} else {
-				micro[element.Microbe] += 1
-				let anti = element.Antibiotic
-				if (arr[id].Antibiotics[anti]) {
-					arr[id].Antibiotics[anti].push(element.Result)
-				} else {
-					arr[id].Antibiotics[anti] = [element.Result]
-				}
-			}
-		})
+		const { data: arr, micro } = summariseAst(data)
 		res.status(201).json({
 			success: true,
-			message: 'Fetched Patient History Successfully!',
+			message: 'Fetched Monthly Report Successfully!',
 			data: arr,
 			micro,
 			report,
 		})
 	} catch (error) {
-		//console.log(error)
+		console.log(error)
 		res.status(500).json({
 			success: false,
 			message: error.message,
 		})
 	}
 }
+
+// New data (Lab ID system): the report, the patient and the specimen
+// are all linked by lab_id.
 const getNewMonthlyData = async (req, res, next) => {
 	try {
-		const { month, year } = req.body
-		//console.log(month, year)
-		const data = await newReportModel.find(
-			{
-				month: month,
-				year: year,
-			},
+		const { month } = req.body
+		const year = Number(req.body.year)
+		const data = await newReportModel.find({ month, year }, { _id: 0, __v: 0 })
+
+		// Fetch only the patients/specimens for this month's Lab IDs.
+		const labIds = [...new Set(data.map((d) => d.lab_id).filter((v) => v))]
+		const patients = await newPatientModel.find(
+			{ lab_id: { $in: labIds } },
 			{ _id: 0, __v: 0 }
 		)
-		const patients = await newPatientModel.find({}, { _id: 0, __v: 0 })
-		const specimens = await newSpecimenModel.find({}, { _id: 0, __v: 0 })
+		const specimens = await newSpecimenModel.find(
+			{ lab_id: { $in: labIds } },
+			{ _id: 0, __v: 0 }
+		)
+		const patientByLab = indexBy(patients, 'lab_id')
+		const specimenByLab = indexBy(specimens, 'lab_id')
+
+		// If no patient/specimen exists for a Lab ID, those columns stay blank —
+		// never filled in from someone else's record.
 		const report = data.map((d1) => {
-			const patient = patients.find((p) => p.patient_id === d1.patient_id)
-			const specimen = specimens.find((s) => s.specimen_id === d1.specimen_id)
-
-			const mergedDocument = {
-				...patient._doc,
+			const merged = {
+				...(patientByLab.get(d1.lab_id) || {}),
+				...(specimenByLab.get(d1.lab_id) || {}),
 				...d1._doc,
-				...specimen._doc,
 			}
-			delete mergedDocument.specimen_id
-			delete mergedDocument.patient_id
-			// console.log(mergedDocument);
-			return mergedDocument
+			delete merged.__v
+			return merged
 		})
-		let ast = []
-		data.forEach((element) => {
-			ast.push(...element.ast)
-		})
-		let arr = []
-		let micro = {}
-		ast.forEach((element) => {
-			let id = arr.findIndex((item) => item.Microbe === element.Microbe)
-			if (id === -1) {
-				let ax = {
-					Microbe: element.Microbe,
-					Antibiotics: {},
-				}
-				micro[element.Microbe] = 1
-				let anti = element.Antibiotic
-				if (ax.Antibiotics[anti]) {
-					ax.Antibiotics[anti].push(element.Result)
-				} else {
-					ax.Antibiotics[anti] = [element.Result]
-				}
 
-				arr.push(ax)
-			} else {
-				micro[element.Microbe] += 1
-				let anti = element.Antibiotic
-				if (arr[id].Antibiotics[anti]) {
-					arr[id].Antibiotics[anti].push(element.Result)
-				} else {
-					arr[id].Antibiotics[anti] = [element.Result]
-				}
-			}
-		})
+		const { data: arr, micro } = summariseAst(data)
 		res.status(201).json({
 			success: true,
-			message: 'Fetched Patient History Successfully!',
+			message: 'Fetched Monthly Report Successfully!',
 			data: arr,
 			micro,
 			report,
 		})
 	} catch (error) {
-		//console.log(error)
+		console.log(error)
 		res.status(500).json({
 			success: false,
 			message: error.message,
