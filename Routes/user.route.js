@@ -8,6 +8,43 @@ import newPatientModel from '../Models/newpatient.model.js'
 import newReportModel from '../Models/newreport.model.js'
 const router = Router()
 
+// Fields that make up a culture report's content. Two reports with the same
+// values for all of these are the same report saved twice.
+const REPORT_FIELDS = [
+	'lab_id',
+	'patient_id',
+	'specimen_id',
+	'direct_microscopic_examination',
+	'culture_results',
+	'ast',
+	'comments',
+	'note',
+	'report_date',
+	'reporter_name',
+	'reporter_designation',
+]
+const reportKey = (r) =>
+	JSON.stringify(
+		REPORT_FIELDS.map((f) => {
+			const v = r[f]
+			if (v === undefined || v === null || v === '') return null
+			if (f === 'report_date') return new Date(v).toISOString()
+			return v
+		})
+	)
+
+// Drop exact repeats (same report saved more than once), keeping the first.
+// Nothing is deleted from the database.
+const dedupeReports = (reports) => {
+	const seen = new Set()
+	return reports.filter((r) => {
+		const k = reportKey(r._doc || r)
+		if (seen.has(k)) return false
+		seen.add(k)
+		return true
+	})
+}
+
 const login = async (req, res, next) => {
 	const { username, password } = req.body
 
@@ -174,6 +211,26 @@ const reportRegister = async (req, res, next) => {
 		]
 		report_data.month = month[today.getMonth()]
 		report_data.year = today.getFullYear()
+
+		// Ignore an exact repeat of a report that is already saved (e.g. Submit
+		// pressed more than once). A different result for the same Lab ID is
+		// still saved as a new report.
+		const alreadySaved = await newReportModel.findOne({
+			lab_id: report_data.lab_id,
+			report_date: today,
+			direct_microscopic_examination: report_data.direct_microscopic_examination,
+			culture_results: report_data.culture_results,
+		})
+		if (
+			alreadySaved &&
+			reportKey(alreadySaved.toObject()) === reportKey(report_data)
+		) {
+			return res.status(201).json({
+				success: true,
+				message: 'Report already saved.',
+			})
+		}
+
 		await newReportModel.insertMany(report_data)
 
 		res.status(201).json({
@@ -346,7 +403,9 @@ const getMonthlyData = async (req, res, next) => {
 	try {
 		const { month } = req.body
 		const year = Number(req.body.year)
-		const data = await reportModel.find({ month, year }, { _id: 0, __v: 0 })
+		const data = dedupeReports(
+			await reportModel.find({ month, year }, { _id: 0, __v: 0 })
+		)
 
 		const patientIds = [
 			...new Set(data.map((d) => d.patient_id).filter((v) => v)),
@@ -399,7 +458,9 @@ const getNewMonthlyData = async (req, res, next) => {
 	try {
 		const { month } = req.body
 		const year = Number(req.body.year)
-		const data = await newReportModel.find({ month, year }, { _id: 0, __v: 0 })
+		const data = dedupeReports(
+			await newReportModel.find({ month, year }, { _id: 0, __v: 0 })
+		)
 
 		// Fetch only the patients/specimens for this month's Lab IDs.
 		const labIds = [...new Set(data.map((d) => d.lab_id).filter((v) => v))]
