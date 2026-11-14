@@ -112,28 +112,97 @@ const patientDetails = async (req, res, next) => {
 	}
 }
 
+// Labels shown to the user when a required Request Form field is missing.
+const FIELD_LABELS = {
+	lab_id: 'Lab ID',
+	patient_name: 'Patient Name',
+	father_name: 'Father/Spouse Name',
+	village_name: 'Village/Town',
+	patient_age: 'Patient Age',
+	gender: 'Gender',
+	patient_mobile: 'Mobile Number',
+	location: 'Location',
+	clinical_ho: 'Clinical H/O',
+	provisional_diagnosis: 'Provisional Diagnosis',
+	antibiotics_given: 'Antibiotics Given',
+	specimen_nature: 'Nature of Specimen',
+	specimen_source: 'Specimen Source/Body site',
+	collection_date: 'Date of collection',
+	collection_time: 'Time of collection',
+	illness_duration: 'Duration of illness',
+	investigation_required: 'Investigation Required',
+	admission_date: 'Date of admission',
+	physician_name: 'Name of the Physician/Nurse',
+}
+const invalidFields = (Model, data) => {
+	const err = new Model(data).validateSync()
+	return err ? Object.keys(err.errors) : []
+}
+
+// Saves a Request Form: one patient record and one specimen record that share
+// a Lab ID. Either both are saved or neither is.
 const newSpecimenRegister = async (req, res, next) => {
 	try {
-		let { patient_data, specimen_data } = req.body
+		const patient_data = { ...(req.body.patient_data || {}) }
+		const specimen_data = { ...(req.body.specimen_data || {}) }
+		const lab_id =
+			typeof patient_data.lab_id === 'string'
+				? patient_data.lab_id.trim()
+				: patient_data.lab_id
+		patient_data.lab_id = lab_id
+		specimen_data.lab_id = lab_id
 
-		patient_data = {
-			...patient_data,
+		// Check both records before saving anything, so a missing specimen field
+		// can no longer leave a patient saved without a specimen.
+		const missing = [
+			...new Set([
+				...invalidFields(newPatientModel, patient_data),
+				...invalidFields(newSpecimenModel, specimen_data),
+			]),
+		]
+		if (missing.length > 0) {
+			return res.status(400).json({
+				success: false,
+				message:
+					'Please fill in: ' +
+					missing.map((f) => FIELD_LABELS[f] || f).join(', '),
+				missing,
+			})
 		}
 
-		let { lab_id } = patient_data
-
-		specimen_data = {
-			...specimen_data,
+		const existingPatient = await newPatientModel.findOne({ lab_id })
+		const existingSpecimen = await newSpecimenModel.findOne({ lab_id })
+		if (existingSpecimen) {
+			return res.status(409).json({
+				success: false,
+				message: `Lab ID ${lab_id} is already registered. Nothing was saved. Check the Lab ID, or use a new one.`,
+			})
 		}
 
-		console.log(lab_id)
-
-		await newPatientModel.insertMany(patient_data)
-		await newSpecimenModel.insertMany(specimen_data)
+		if (existingPatient) {
+			// Left over from an earlier attempt that saved the patient but not the
+			// specimen: complete that registration with the details entered now.
+			const { lab_id: _ignored, ...patientFields } = patient_data
+			await newPatientModel.updateOne(
+				{ _id: existingPatient._id },
+				{ $set: patientFields },
+				{ runValidators: true }
+			)
+			await newSpecimenModel.insertMany([specimen_data])
+		} else {
+			const [savedPatient] = await newPatientModel.insertMany([patient_data])
+			try {
+				await newSpecimenModel.insertMany([specimen_data])
+			} catch (error) {
+				// Undo the patient just saved so no half-registration is left behind.
+				await newPatientModel.deleteOne({ _id: savedPatient._id })
+				throw error
+			}
+		}
 
 		res.status(201).json({
 			success: true,
-			message: 'Data Added Successfully!',
+			message: 'Request Form saved.',
 			lab_id,
 		})
 	} catch (error) {
@@ -194,23 +263,24 @@ const reportRegister = async (req, res, next) => {
 		const { report_data } = req.body
 		//console.log(report_data)
 		const today = new Date(report_data.report_date)
-		//console.log(today)
-		const month = [
-			'January',
-			'February',
-			'March',
-			'April',
-			'May',
-			'June',
-			'July',
-			'August',
-			'September',
-			'October',
-			'November',
-			'December',
-		]
-		report_data.month = month[today.getMonth()]
-		report_data.year = today.getFullYear()
+		if (!report_data.report_date || isNaN(today.getTime())) {
+			return res.status(400).json({
+				success: false,
+				message: 'Please enter the report date.',
+			})
+		}
+		// File the report under the month of its report date in Indian time.
+		// (The server clock is UTC, where 1 November 00:00 IST is still 31 October.)
+		report_data.month = new Intl.DateTimeFormat('en-US', {
+			timeZone: 'Asia/Kolkata',
+			month: 'long',
+		}).format(today)
+		report_data.year = Number(
+			new Intl.DateTimeFormat('en-US', {
+				timeZone: 'Asia/Kolkata',
+				year: 'numeric',
+			}).format(today)
+		)
 
 		// Ignore an exact repeat of a report that is already saved (e.g. Submit
 		// pressed more than once). A different result for the same Lab ID is
@@ -278,7 +348,11 @@ const getNewReport = async (req, res, next) => {
 	try {
 		let { lab_id } = req.body
 
-		let report = await newReportModel.findOne({ lab_id }, { _id: 0 })
+		// Latest saved report for this Lab ID, so a corrected report replaces
+		// the earlier one on the printout.
+		let report = await newReportModel
+			.findOne({ lab_id }, { _id: 0 })
+			.sort({ _id: -1 })
 		let patientData = await newPatientModel.findOne({ lab_id }, { _id: 0 })
 		let specimenData = await newSpecimenModel.findOne({ lab_id }, { _id: 0 })
 		res.status(201).json({
@@ -313,7 +387,14 @@ const getDetails = async (req, res, next) => {
 			{ lab_id: lab_id },
 			{ _id: 0 }
 		)
-		//console.log(specimenData)
+		if (!patientData || !specimenData) {
+			return res.status(404).json({
+				success: false,
+				message: patientData
+					? `The Request Form for Lab ID ${lab_id} was not saved completely. Please enter the Request Form again.`
+					: `No Request Form found for Lab ID ${lab_id}.`,
+			})
+		}
 		res.status(201).json({
 			success: true,
 			message: 'Fetched Report Successfully!',
@@ -371,10 +452,12 @@ const summariseAst = (reports) => {
 				arr.push(entry)
 			}
 			const anti = element.Antibiotic
+			// Disc diffusion result, or the MIC interpretation when only MIC was done
+			const outcome = element.Result || element.Mic_result || ''
 			if (entry.Antibiotics[anti]) {
-				entry.Antibiotics[anti].push(element.Result)
+				entry.Antibiotics[anti].push(outcome)
 			} else {
-				entry.Antibiotics[anti] = [element.Result]
+				entry.Antibiotics[anti] = [outcome]
 			}
 		})
 		organismsInReport.forEach((m) => {
