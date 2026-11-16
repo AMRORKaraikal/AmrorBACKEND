@@ -480,6 +480,96 @@ const indexBy = (docs, key) => {
 	return map
 }
 
+// Old system: attach patient and specimen details to each report
+// (patient by patient_id, specimen by patient_id + specimen_id).
+const joinOldReports = async (data) => {
+	const patientIds = [...new Set(data.map((d) => d.patient_id).filter((v) => v))]
+	const patients = await patientModel.find(
+		{ patient_id: { $in: patientIds } },
+		{ _id: 0, __v: 0 }
+	)
+	const specimens = await specimenModel.find(
+		{ patient_id: { $in: patientIds } },
+		{ _id: 0, __v: 0 }
+	)
+	const patientById = indexBy(patients, 'patient_id')
+	const specimenByKey = new Map()
+	specimens.forEach((s) => {
+		const k = `${s.patient_id}|${s.specimen_id}`
+		if (!specimenByKey.has(k)) specimenByKey.set(k, s._doc || s)
+	})
+
+	return data.map((d1) => {
+		const merged = {
+			...(patientById.get(d1.patient_id) || {}),
+			...(specimenByKey.get(`${d1.patient_id}|${d1.specimen_id}`) || {}),
+			...(d1._doc || d1),
+		}
+		delete merged.__v
+		return merged
+	})
+}
+
+// Lab ID system: attach patient and specimen details to each report by lab_id.
+// If no patient/specimen exists for a Lab ID, those columns stay blank —
+// never filled in from someone else's record.
+const joinLabIdReports = async (data) => {
+	const labIds = [...new Set(data.map((d) => d.lab_id).filter((v) => v))]
+	const patients = await newPatientModel.find(
+		{ lab_id: { $in: labIds } },
+		{ _id: 0, __v: 0 }
+	)
+	const specimens = await newSpecimenModel.find(
+		{ lab_id: { $in: labIds } },
+		{ _id: 0, __v: 0 }
+	)
+	const patientByLab = indexBy(patients, 'lab_id')
+	const specimenByLab = indexBy(specimens, 'lab_id')
+
+	return data.map((d1) => {
+		const merged = {
+			...(patientByLab.get(d1.lab_id) || {}),
+			...(specimenByLab.get(d1.lab_id) || {}),
+			...(d1._doc || d1),
+		}
+		delete merged.__v
+		return merged
+	})
+}
+
+const byReportDate = (a, b) =>
+	new Date(a.report_date).getTime() - new Date(b.report_date).getTime()
+
+// Every culture report from the earliest one to today, for the complete Excel.
+//   labIdReports -> Lab ID system (October 2024 onwards)
+//   olderReports -> old system (before the Lab ID system)
+// Same rows as the monthly reports: duplicates skipped, oldest first.
+const getAllReports = async (req, res, next) => {
+	try {
+		const labIdData = dedupeReports(
+			await newReportModel.find({}, { _id: 0, __v: 0 })
+		)
+		const olderData = dedupeReports(
+			await reportModel.find({}, { _id: 0, __v: 0 })
+		)
+		const labIdReports = (await joinLabIdReports(labIdData)).sort(byReportDate)
+		const olderReports = (await joinOldReports(olderData)).sort(byReportDate)
+
+		res.status(200).json({
+			success: true,
+			message: 'Fetched All Reports Successfully!',
+			labIdReports,
+			olderReports,
+		})
+	} catch (error) {
+		console.log(error)
+		res.status(500).json({
+			success: false,
+			message: error.message,
+		})
+	}
+}
+
 // Old data (before the Lab ID system): reports link to patients by patient_id
 // and to specimens by patient_id + specimen_id.
 const getMonthlyData = async (req, res, next) => {
@@ -490,33 +580,7 @@ const getMonthlyData = async (req, res, next) => {
 			await reportModel.find({ month, year }, { _id: 0, __v: 0 })
 		)
 
-		const patientIds = [
-			...new Set(data.map((d) => d.patient_id).filter((v) => v)),
-		]
-		const patients = await patientModel.find(
-			{ patient_id: { $in: patientIds } },
-			{ _id: 0, __v: 0 }
-		)
-		const specimens = await specimenModel.find(
-			{ patient_id: { $in: patientIds } },
-			{ _id: 0, __v: 0 }
-		)
-		const patientById = indexBy(patients, 'patient_id')
-		const specimenByKey = new Map()
-		specimens.forEach((s) => {
-			const k = `${s.patient_id}|${s.specimen_id}`
-			if (!specimenByKey.has(k)) specimenByKey.set(k, s._doc)
-		})
-
-		const report = data.map((d1) => {
-			const merged = {
-				...(patientById.get(d1.patient_id) || {}),
-				...(specimenByKey.get(`${d1.patient_id}|${d1.specimen_id}`) || {}),
-				...d1._doc,
-			}
-			delete merged.__v
-			return merged
-		})
+		const report = await joinOldReports(data)
 
 		const { data: arr, micro } = summariseAst(data)
 		res.status(201).json({
@@ -545,30 +609,7 @@ const getNewMonthlyData = async (req, res, next) => {
 			await newReportModel.find({ month, year }, { _id: 0, __v: 0 })
 		)
 
-		// Fetch only the patients/specimens for this month's Lab IDs.
-		const labIds = [...new Set(data.map((d) => d.lab_id).filter((v) => v))]
-		const patients = await newPatientModel.find(
-			{ lab_id: { $in: labIds } },
-			{ _id: 0, __v: 0 }
-		)
-		const specimens = await newSpecimenModel.find(
-			{ lab_id: { $in: labIds } },
-			{ _id: 0, __v: 0 }
-		)
-		const patientByLab = indexBy(patients, 'lab_id')
-		const specimenByLab = indexBy(specimens, 'lab_id')
-
-		// If no patient/specimen exists for a Lab ID, those columns stay blank —
-		// never filled in from someone else's record.
-		const report = data.map((d1) => {
-			const merged = {
-				...(patientByLab.get(d1.lab_id) || {}),
-				...(specimenByLab.get(d1.lab_id) || {}),
-				...d1._doc,
-			}
-			delete merged.__v
-			return merged
-		})
+		const report = await joinLabIdReports(data)
 
 		const { data: arr, micro } = summariseAst(data)
 		res.status(201).json({
@@ -591,6 +632,7 @@ router.post('/login', login)
 router.post('/patient-details', patientDetails)
 router.post('/report', getMonthlyData)
 router.post('/updated-report', getNewMonthlyData)
+router.post('/all-reports', getAllReports)
 router.post('/new-specimen', newSpecimenRegister)
 
 router.post('/existing-specimen-register', ExistingSpecimenRegister)
